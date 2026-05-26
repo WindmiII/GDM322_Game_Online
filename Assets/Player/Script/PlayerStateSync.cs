@@ -16,6 +16,11 @@ public class PlayerStateSync : NetworkBehaviour
     [Header("Health UI")]
     [SerializeField] private TMP_Text hpTextUI; 
 
+    [Header("Hit VFX (Survivor Only)")]
+    public GameObject hitVfxPrefab;       // Spawned at survivor position when they take damage.
+    public float hitVfxLifetime = 2f;     // Auto-destroy after this many seconds.
+    public Vector3 hitVfxOffset = new Vector3(0f, 1f, 0f); // Local-space offset above feet.
+
     [Header("Death Settings (Survivor Only)")]
     public GameObject deadUI; // UI to show when dead
     public GameObject[] modelsToHide; // Models and character parts to hide
@@ -185,26 +190,9 @@ public class PlayerStateSync : NetworkBehaviour
             }
         }
 
-        // Spectator mode for dead Survivors
-        if (IsOwner && RoleIndex.Value == 0 && Health.Value <= 0 && canSpectate)
-        {
-            if (spectateTarget == null)
-            {
-                FindNextSpectateTarget();
-            }
-
-            if (spectateTarget != null)
-            {
-                // Move ourselves to the target to spectate
-                transform.position = spectateTarget.position;
-
-                // Left click to switch spectate target
-                if (Input.GetMouseButtonDown(0))
-                {
-                    FindNextSpectateTarget();
-                }
-            }
-        }
+        // Spectator mode for dead Survivors:
+        // Handled event-driven via BeginMonsterSpectate() in WaitBeforeSpectate, which engages
+        // SpectatorCameraController to smoothly follow the monster. No per-frame work needed here.
 
         // ดึงเวลาจาก GameTimeManager มาแสดงผลและเช็คเวลาหมด
         if (GameTimeManager.Instance != null && IsOwner)
@@ -270,6 +258,15 @@ public class PlayerStateSync : NetworkBehaviour
         if (RoleIndex.Value == 0 && IsOwner)
         {
             UpdateHPUI(newValue);
+        }
+
+        // VFX: spawn hit effect when survivor takes damage (HP went down).
+        // Runs on every client because OnValueChanged fires everywhere.
+        if (RoleIndex.Value == 0 && newValue < oldValue && hitVfxPrefab != null)
+        {
+            Vector3 spawnPos = transform.position + hitVfxOffset;
+            GameObject vfx = Instantiate(hitVfxPrefab, spawnPos, Quaternion.identity);
+            Destroy(vfx, hitVfxLifetime);
         }
 
         // Check if out of health or respawned (Survivor only)
@@ -354,7 +351,7 @@ public class PlayerStateSync : NetworkBehaviour
         yield return new WaitForSeconds(delay);
         canSpectate = true;
         if (deadUI != null) deadUI.SetActive(false); // Close Die screen when spectating starts
-        FindNextSpectateTarget();
+        BeginMonsterSpectate(); // NEW: hand off to SpectatorCameraController to follow the monster
     }
 
     private void HandleRespawn()
@@ -379,6 +376,10 @@ public class PlayerStateSync : NetworkBehaviour
                 spectateCoroutine = null;
             }
 
+            // NEW: stop the death-spectator camera (restores own camera under its original parent).
+            var spectator = GetComponent<SpectatorCameraController>();
+            if (spectator != null) spectator.StopSpectating();
+
             if (deadUI != null) deadUI.SetActive(false);
             foreach (var script in scriptsToDisable)
                 if (script != null) script.enabled = true;
@@ -387,24 +388,47 @@ public class PlayerStateSync : NetworkBehaviour
         }
     }
 
-    private void FindNextSpectateTarget()
+    // NEW: kick off the spectator camera following the monster, after the 5s "you died" wait.
+    // Mirrors the MonsterPreview phase behavior — same SpectatorCameraController, same smoothing,
+    // same 3rd-person offsets.
+    private void BeginMonsterSpectate()
     {
-        PlayerStateSync[] allPlayers = FindObjectsOfType<PlayerStateSync>();
-        if (allPlayers.Length <= 1) return;
+        if (!IsOwner) return;
 
-        for (int i = 0; i < allPlayers.Length; i++)
+        Transform monsterTransform = ResolveMonsterTransform();
+        if (monsterTransform == null)
         {
-            spectateIndex = (spectateIndex + 1) % allPlayers.Length;
-            PlayerStateSync targetPlayer = allPlayers[spectateIndex];
-
-            // Spectate only living Survivors (Role == 0)
-            if (targetPlayer != this && targetPlayer.Health.Value > 0 && targetPlayer.RoleIndex.Value == 0)
-            {
-                spectateTarget = targetPlayer.transform;
-                return;
-            }
+            Debug.LogWarning("[PlayerStateSync] BeginMonsterSpectate: no monster found — cannot spectate.");
+            return;
         }
-        spectateTarget = null;
+
+        var spectator = GetComponent<SpectatorCameraController>();
+        if (spectator == null)
+        {
+            Debug.LogWarning("[PlayerStateSync] BeginMonsterSpectate: no SpectatorCameraController on this player.");
+            return;
+        }
+
+        spectator.StartSpectating(monsterTransform);
+        Debug.Log("[PlayerStateSync] Dead survivor now spectating monster.");
+    }
+
+    // Try RoundManager.MonsterPlayerRef first (authoritative — set when round started).
+    // Fall back to searching by RoleIndex in case the round started weirdly (debug / edge cases).
+    private Transform ResolveMonsterTransform()
+    {
+        if (RoundManager.Instance != null)
+        {
+            if (RoundManager.Instance.MonsterPlayerRef.Value.TryGet(out NetworkObject mo) && mo != null)
+                return mo.transform;
+        }
+
+        PlayerStateSync[] all = FindObjectsOfType<PlayerStateSync>();
+        foreach (var p in all)
+        {
+            if (p != null && p.RoleIndex.Value == 1) return p.transform;
+        }
+        return null;
     }
 
     private void CheckGameOver()

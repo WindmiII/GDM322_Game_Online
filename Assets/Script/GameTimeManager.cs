@@ -74,29 +74,33 @@ public class GameTimeManager : NetworkBehaviour
             return;
         }
 
-        bool isGameStarted = LobbyManager.Instance != null && LobbyManager.Instance.IsGameStarted.Value;
+        // CHANGED (§5.2 / §12.15): main timer UI + tick are now gated on RoundPhase.Active,
+        // not LobbyManager.IsGameStarted. This hides the 5:00 timer during preview/hide phases —
+        // those phases use PhaseUI's own countdown instead.
+        bool isActive = RoundManager.Instance != null &&
+                        RoundManager.Instance.CurrentPhase.Value == RoundPhase.Active;
 
-        // เปิด/ปิด UI เวลาตามสถานะการเริ่มเกม (ซ่อนไว้ก่อนจนกว่า Host จะกด Start)
+        // เปิด/ปิด UI เวลาตามสถานะของ Round Phase (ซ่อนไว้จนกว่าจะถึง Active phase จริงๆ)
         if (timerTextUI != null)
         {
-            if (timerTextUI.gameObject.activeSelf != isGameStarted)
+            if (timerTextUI.gameObject.activeSelf != isActive)
             {
-                timerTextUI.gameObject.SetActive(isGameStarted);
+                timerTextUI.gameObject.SetActive(isActive);
                 
-                if (isGameStarted) UpdateTimerUI(GameTimer.Value); // อัปเดตตัวเลขให้ตรงทันทีที่โชว์
+                if (isActive) UpdateTimerUI(GameTimer.Value); // อัปเดตตัวเลขให้ตรงทันทีที่โชว์
             }
         }
 
         // เปิด/ปิด ภาพพื้นหลังเวลาด้วย (ถ้ามี)
-        if (timerPanel != null && timerPanel.activeSelf != isGameStarted)
+        if (timerPanel != null && timerPanel.activeSelf != isActive)
         {
-            timerPanel.SetActive(isGameStarted);
+            timerPanel.SetActive(isActive);
         }
 
         if (!IsServer) return;
 
-        // เช็คว่าเกมเริ่มแล้วหรือยัง (Host กดปุ่ม Start แล้ว) ถึงจะเริ่มนับเวลา
-        if (GameTimer.Value > 0 && isGameStarted)
+        // เช็คว่าอยู่ใน Active phase แล้วหรือยัง (preview/hide ผ่านไปแล้ว) ถึงจะเริ่มนับเวลา 5 นาทีหลัก
+        if (GameTimer.Value > 0 && isActive)
         {
             timerTick += Time.deltaTime;
             if (timerTick >= 1f)

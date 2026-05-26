@@ -118,11 +118,20 @@ public class LobbyManager : NetworkBehaviour
         }
     }
 
+    // CHANGED: hand off to RoundManager. RoundManager will flip IsGameStarted at the right moment
+    // (which keeps the existing OnGameStarted callback working — lobby UI closes, cursor locks).
     public void OnStartGameButtonClicked()
     {
-        if (IsServer)
+        if (!IsServer) return;
+        if (RoundManager.Instance != null)
         {
-            IsGameStarted.Value = true; 
+            RoundManager.Instance.BeginRound();
+        }
+        else
+        {
+            // Fallback for safety if RoundManager isn't in the scene yet — preserves old behavior.
+            Debug.LogWarning("[LobbyManager] RoundManager.Instance is null — falling back to direct IsGameStarted flip.");
+            IsGameStarted.Value = true;
         }
     }
 

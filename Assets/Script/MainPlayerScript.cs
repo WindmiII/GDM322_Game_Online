@@ -1,3 +1,4 @@
+using System.Collections;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using Unity.Netcode;
@@ -38,6 +39,13 @@ public class MainPlayerScript : NetworkBehaviour
     [Header("Hide For Local Player")]
     public Renderer[] visualsToHide;
 
+    [Header("Player Tags (floating UI above player)")]
+    public GameObject nameTag; // Name text GameObject — toggled with body visibility
+
+    [Header("VFX")]
+    public GameObject transformVfxPrefab; // Spawned at player position on prop transform / reset.
+    public float transformVfxLifetime = 2f;
+
     [Header("UI Settings")]
     public GameObject monsterUI; // Slot for Monster UI
     public GameObject survivorUI; // Slot for Survivor UI
@@ -63,10 +71,18 @@ public class MainPlayerScript : NetworkBehaviour
     private float targetFOV;
     private bool isThirdPersonCamera = false;
 
+    // NEW: subscription bookkeeping for RoundManager
+    private bool _subscribedToRoundManager = false;
+    private SpectatorCameraController _spectatorController;
+    private PlayerPowerupReceiver _powerupReceiver;
+    private Coroutine _monsterRefRetryCoroutine;
+
     public override void OnNetworkSpawn()
     {
         rb = GetComponent<Rigidbody>();
         playerInput = GetComponent<PlayerInput>(); // Get the Component
+        _spectatorController = GetComponent<SpectatorCameraController>();
+        _powerupReceiver = GetComponent<PlayerPowerupReceiver>();
 
         // Try to find Camera automatically if not assigned in Inspector
         if (cameraTransform == null)
@@ -121,6 +137,12 @@ public class MainPlayerScript : NetworkBehaviour
                     OnGameStartedChanged(false, true);
                 }
             }
+
+            // NEW (§12.17): subscribe to RoundManager phase changes via coroutine
+            // because the singleton may not be set yet when OnNetworkSpawn fires.
+            // (Moved out of IsOwner block: every client must run visibility hiding for every
+            // survivor visible on the monster's screen during MonsterPreview. Owner-only work
+            // is gated inside the handler itself.)
         }
         else
         {
@@ -133,6 +155,9 @@ public class MainPlayerScript : NetworkBehaviour
             if (survivorUI != null) survivorUI.SetActive(false);
         }
         cameraSetup = GetComponent<PlayerCameraSetup>();
+
+        // Subscribe regardless of ownership — phase-driven visibility must run on every client.
+        StartCoroutine(SubscribeRoundManagerWhenReady());
     }
 
     public override void OnNetworkDespawn()
@@ -141,6 +166,29 @@ public class MainPlayerScript : NetworkBehaviour
         {
             LobbyManager.Instance.IsGameStarted.OnValueChanged -= OnGameStartedChanged;
         }
+
+        // NEW: clean up RoundManager subscription
+        if (_subscribedToRoundManager && RoundManager.Instance != null)
+        {
+            RoundManager.Instance.CurrentPhase.OnValueChanged -= OnRoundPhaseChanged;
+            _subscribedToRoundManager = false;
+        }
+        if (_monsterRefRetryCoroutine != null)
+        {
+            StopCoroutine(_monsterRefRetryCoroutine);
+            _monsterRefRetryCoroutine = null;
+        }
+    }
+
+    // NEW (§12.17): wait until RoundManager.Instance exists, then subscribe and apply the current phase
+    // (this fires the late-joiner correctness path automatically too — §6.5).
+    private IEnumerator SubscribeRoundManagerWhenReady()
+    {
+        while (RoundManager.Instance == null) yield return null;
+        RoundManager.Instance.CurrentPhase.OnValueChanged += OnRoundPhaseChanged;
+        _subscribedToRoundManager = true;
+        Debug.Log($"[MainPlayerScript] Subscribed to RoundManager. Current phase = {RoundManager.Instance.CurrentPhase.Value}. _spectatorController null? {_spectatorController == null}");
+        OnRoundPhaseChanged(RoundPhase.Lobby, RoundManager.Instance.CurrentPhase.Value);
     }
 
     private void OnGameStartedChanged(bool previousValue, bool newValue)
@@ -168,6 +216,108 @@ public class MainPlayerScript : NetworkBehaviour
         }
     }
 
+    // NEW (§5.3 d, §12.11): react to phase changes.
+    // This handler runs on every client for every player object — visibility changes must
+    // propagate everywhere (the monster's client must hide the survivor's body, not just the
+    // survivor's own client). Owner-only work (spectator camera, retry coroutine) is gated
+    // by IsOwner inside the relevant branches.
+    private void OnRoundPhaseChanged(RoundPhase prev, RoundPhase next)
+    {
+        PlayerStateSync state = GetComponent<PlayerStateSync>();
+        if (state == null) { Debug.LogWarning("[MainPlayerScript] OnRoundPhaseChanged: no PlayerStateSync."); return; }
+        int role = state.RoleIndex.Value;
+
+        Debug.Log($"[MainPlayerScript] OnRoundPhaseChanged: {prev} -> {next}, role={role}, IsOwner={IsOwner}");
+
+        // Survivor logic
+        if (role == 0)
+        {
+            if (next == RoundPhase.MonsterPreview)
+            {
+                // VISIBILITY (every client): hide this survivor's body and name tag so the
+                // monster cannot see survivors during preview.
+                if (playerVisualBody != null) playerVisualBody.gameObject.SetActive(false);
+                if (nameTag != null) nameTag.SetActive(false);
+
+                // OWNER-ONLY: start spectating the monster.
+                if (IsOwner)
+                {
+                    Debug.Log("[MainPlayerScript] Survivor entering preview (owner): starting spectator.");
+                    BeginSpectatingMonster();
+                }
+            }
+            else if (prev == RoundPhase.MonsterPreview && next != RoundPhase.MonsterPreview)
+            {
+                // VISIBILITY (every client): restore body and name now that preview is over.
+                if (playerVisualBody != null) playerVisualBody.gameObject.SetActive(true);
+                if (nameTag != null) nameTag.SetActive(true);
+
+                // OWNER-ONLY: stop spectating, restore own camera.
+                if (IsOwner)
+                {
+                    Debug.Log("[MainPlayerScript] Survivor leaving preview (owner): stopping spectator.");
+                    if (_spectatorController != null) _spectatorController.StopSpectating();
+                    if (_monsterRefRetryCoroutine != null)
+                    {
+                        StopCoroutine(_monsterRefRetryCoroutine);
+                        _monsterRefRetryCoroutine = null;
+                    }
+                }
+            }
+        }
+    }
+
+    private void BeginSpectatingMonster()
+    {
+        if (_spectatorController == null)
+        {
+            Debug.LogWarning("[MainPlayerScript] BeginSpectatingMonster: _spectatorController is NULL on this prefab. " +
+                             "Did you add SpectatorCameraController to the Survivors prefab?");
+            return;
+        }
+        if (_monsterRefRetryCoroutine != null) StopCoroutine(_monsterRefRetryCoroutine);
+        _monsterRefRetryCoroutine = StartCoroutine(ResolveMonsterAndSpectate());
+    }
+
+    private IEnumerator ResolveMonsterAndSpectate()
+    {
+        float deadline = Time.time + 1.0f;
+        int attempts = 0;
+        while (Time.time < deadline)
+        {
+            attempts++;
+            if (RoundManager.Instance != null &&
+                RoundManager.Instance.MonsterPlayerRef.Value.TryGet(out NetworkObject monsterObj))
+            {
+                Debug.Log($"[MainPlayerScript] Monster ref resolved after {attempts} attempts. Starting spectator.");
+                _spectatorController.StartSpectating(monsterObj.transform);
+                _monsterRefRetryCoroutine = null;
+                yield break;
+            }
+            yield return null;
+        }
+        Debug.LogWarning($"[MainPlayerScript] Could not resolve monster ref within 1s (attempts={attempts}); spectator camera not started.");
+        _monsterRefRetryCoroutine = null;
+    }
+
+    // NEW (§5.3 a, §12.3): unified gating that combines IsGameStarted + RoundManager phase + RoleIndex.
+    // Returns true if the local player is allowed to act (move, jump, fire) right now.
+    private bool CanLocalPlayerAct()
+    {
+        if (LobbyManager.Instance != null && !LobbyManager.Instance.IsGameStarted.Value) return false;
+        if (RoundManager.Instance == null) return true; // fallback if RoundManager missing from scene
+        var phase = RoundManager.Instance.CurrentPhase.Value;
+        if (phase == RoundPhase.Lobby || phase == RoundPhase.Ended) return false;
+
+        var state = GetComponent<PlayerStateSync>();
+        int role = state != null ? state.RoleIndex.Value : 0;
+
+        // Phase-vs-role: only the active side can act.
+        if (phase == RoundPhase.MonsterPreview) return role == 1;  // only monster moves during preview
+        if (phase == RoundPhase.SurvivorHide)   return role == 0;  // only survivors move during hide
+        return true; // Active = both sides act
+    }
+
     public void OnMove(InputAction.CallbackContext context)
     {
         if (!IsOwner) return;
@@ -192,7 +342,8 @@ public class MainPlayerScript : NetworkBehaviour
         bool isJUnlocked = myState != null && myState.IsCursorUnlocked;
 
         if (isTyping || (GameMenuManager.Instance != null && GameMenuManager.Instance.isMenuOpen) || isJUnlocked) return;
-        if (LobbyManager.Instance != null && !LobbyManager.Instance.IsGameStarted.Value) return;
+        // CHANGED (§12.3): phase-aware gate instead of just IsGameStarted.
+        if (!CanLocalPlayerAct()) return;
 
         if (context.performed && IsGrounded())
         {
@@ -236,6 +387,9 @@ public class MainPlayerScript : NetworkBehaviour
         // Don't attack if menu is open
         if (GameMenuManager.Instance != null && GameMenuManager.Instance.isMenuOpen) return;
 
+        // Layer 1 (§12.6): phase-vs-role gate. Wrong-role player can't fire at all.
+        if (!CanLocalPlayerAct()) return;
+
         // Separate logic by Role on left click
         if (context.started)
         {
@@ -244,12 +398,22 @@ public class MainPlayerScript : NetworkBehaviour
             if (myState != null)
             {
                 Debug.Log($"[OnFire] Current Role Index: {myState.RoleIndex.Value}");
+
+                // Layer 2 (§12.6): even for the right-role player, narrow further by phase.
+                RoundPhase phase = RoundManager.Instance != null
+                    ? RoundManager.Instance.CurrentPhase.Value
+                    : RoundPhase.Active;
+
                 if (myState.RoleIndex.Value == 1) // Monster
                 {
+                    // Monster only attacks during Active (not during their own preview phase).
+                    if (phase != RoundPhase.Active) return;
                     AttemptAttack();
                 }
                 else if (myState.RoleIndex.Value == 0) // Survivor
                 {
+                    // Survivors can transform during Hide AND Active (lets them set up during hide).
+                    if (phase != RoundPhase.Active && phase != RoundPhase.SurvivorHide) return;
                     HandlePropTransformation();
                 }
             }
@@ -364,11 +528,28 @@ public class MainPlayerScript : NetworkBehaviour
         ChangePropClientRpc(propName);
     }
 
+    // VFX helper: spawns the transform puff prefab at the player's position.
+    // Called from both ChangePropClientRpc and ResetToHumanClientRpc (each runs on every client).
+    // Safe to call when prefab is unassigned — just no-ops.
+    private void SpawnTransformVfx()
+    {
+        if (transformVfxPrefab == null) return;
+        Vector3 spawnPos = transform.position + Vector3.up * 0.5f;
+        GameObject vfx = Instantiate(transformVfxPrefab, spawnPos, Quaternion.identity);
+        Destroy(vfx, transformVfxLifetime);
+    }
+
     [ClientRpc]
     private void ChangePropClientRpc(string propName)
     {
+        // VFX: spawn transform puff at player position on every client.
+        SpawnTransformVfx();
+
         // 1. Hide original body (SurvivorsCapsule)
         if (playerVisualBody != null) playerVisualBody.gameObject.SetActive(false);
+
+        // Hide name tag too — otherwise it floats above the prop and reveals the survivor.
+        if (nameTag != null) nameTag.SetActive(false);
 
         if (propVisualContainer != null)
         {
@@ -407,6 +588,9 @@ public class MainPlayerScript : NetworkBehaviour
     [ClientRpc]
     private void ResetToHumanClientRpc()
     {
+        // VFX: spawn transform puff at player position on every client.
+        SpawnTransformVfx();
+
         // 1. ปิดโมเดลวัตถุ (Prop) ทุกตัวที่เคยแปลงร่างไว้
         if (propVisualContainer != null)
         {
@@ -427,6 +611,9 @@ public class MainPlayerScript : NetworkBehaviour
             
             currentMeshTransform = playerVisualBody; // Reset camera target to human
         }
+
+        // Restore name tag now that the human body is back.
+        if (nameTag != null) nameTag.SetActive(true);
         
         // 3. เปิด UI เฉพาะของ Survivor กลับมา
         if (IsOwner && survivorUI != null)
@@ -441,8 +628,8 @@ public class MainPlayerScript : NetworkBehaviour
     {
         if (!IsOwner) return;
 
-        // Check if game has started, if not return early (prevent looking)
-        if (LobbyManager.Instance != null && !LobbyManager.Instance.IsGameStarted.Value) return;
+        // CHANGED (§12.3): phase-aware gate instead of just IsGameStarted.
+        if (!CanLocalPlayerAct()) return;
 
         // Check menu
         if (GameMenuManager.Instance != null && GameMenuManager.Instance.isMenuOpen) return;
@@ -523,10 +710,14 @@ public class MainPlayerScript : NetworkBehaviour
     {
         if (!IsOwner) return;
 
-        // If game hasn't started, stop velocity and return (prevent moving)
-        if (LobbyManager.Instance != null && !LobbyManager.Instance.IsGameStarted.Value)
+        // CHANGED (§12.3): phase-aware gate instead of just IsGameStarted.
+        if (!CanLocalPlayerAct())
         {
-            rb.velocity = new Vector3(0, rb.velocity.y, 0);
+            // Skip velocity write if the rigidbody is currently kinematic (e.g. monster locked
+            // during SurvivorHide via TeleportAndLockClientRpc). Setting velocity on a kinematic
+            // body throws a Unity warning every frame and is a no-op.
+            if (rb != null && !rb.isKinematic)
+                rb.velocity = new Vector3(0, rb.velocity.y, 0);
             return;
         }
 
@@ -536,7 +727,8 @@ public class MainPlayerScript : NetworkBehaviour
         // Stop moving if menu is open or typing
         if ((GameMenuManager.Instance != null && GameMenuManager.Instance.isMenuOpen) || isTyping || isJUnlocked)
         {
-            rb.velocity = new Vector3(0, rb.velocity.y, 0);
+            if (rb != null && !rb.isKinematic)
+                rb.velocity = new Vector3(0, rb.velocity.y, 0);
             return;
         }
 
@@ -582,7 +774,12 @@ public class MainPlayerScript : NetworkBehaviour
         // เช็คว่ากด Shift วิ่งอยู่ และ ต้องเป็นการกดเดินหน้า (W) เท่านั้น
         bool isActuallySprinting = isSprinting && moveInput.y > 0;
 
-        float currentSpeed = isActuallySprinting ? sprintSpeed : moveSpeed;
+        // CHANGED (§5.3 b): apply speed multiplier from PlayerPowerupReceiver (default 1.0,
+        // becomes 1.5 for 5s when survivor grabs a speed orb).
+        float multiplier = 1f;
+        if (_powerupReceiver != null) multiplier = _powerupReceiver.SpeedMultiplier.Value;
+
+        float currentSpeed = (isActuallySprinting ? sprintSpeed : moveSpeed) * multiplier;
         Vector3 targetVelocity = moveDirection * currentSpeed;
 
         rb.velocity = new Vector3(targetVelocity.x, rb.velocity.y, targetVelocity.z);
