@@ -12,16 +12,13 @@ GameObject:
   - component: {fileID: 8396572231272122382}
   - component: {fileID: 6334083712922518867}
   - component: {fileID: -845323222960233594}
-  - component: {fileID: -1940896806606782048}
-  - component: {fileID: 7479691720891532080}
-  - component: {fileID: -3594413497076951751}
   m_Layer: 7
   m_Name: Potlid
-  m_TagString: Untagged
+  m_TagString: Prop
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &8720983467198704559
 Transform:
   m_ObjectHideFlags: 0
@@ -30,7 +27,7 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 6033180923991061543}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: -0, z: -0, w: 1}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: -0, y: 0, z: 0}
   m_LocalScale: {x: 0.5, y: 0.5, z: 0.5}
   m_ConstrainProportionsScale: 0
@@ -109,73 +106,3 @@ MeshCollider:
   m_Convex: 1
   m_CookingOptions: 30
   m_Mesh: {fileID: 4327395035173020345, guid: 901ba5c0c52c21244833b6e92d38e46c, type: 3}
---- !u!54 &-1940896806606782048
-Rigidbody:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 6033180923991061543}
-  serializedVersion: 4
-  m_Mass: 1
-  m_Drag: 0
-  m_AngularDrag: 0.05
-  m_CenterOfMass: {x: 0, y: 0, z: 0}
-  m_InertiaTensor: {x: 1, y: 1, z: 1}
-  m_InertiaRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_IncludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ExcludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ImplicitCom: 1
-  m_ImplicitTensor: 1
-  m_UseGravity: 1
-  m_IsKinematic: 0
-  m_Interpolate: 0
-  m_Constraints: 0
-  m_CollisionDetection: 0
---- !u!114 &7479691720891532080
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 6033180923991061543}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 801dea5aa8c0a584d94a3dacf60818c6, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  itemID: Default_ID
-  backupEnemy: {fileID: 0}
-  force: 600
-  damping: 6
-  distance: 15
-  lr: {fileID: 0}
-  lineRenderLocation: {fileID: 0}
-  startValue: 100
-  impactDamageMultiplier: 1
-  valueLossPerDamage: 1
-  minDamageVelocity: 1.5
-  maxValueLossPerHit: 0
-  isEssentialItem: 0
-  postReleaseDamageWindow: 1
-  minThrowSpeedToArm: 2
-  brokenPrefab: {fileID: 8007185694801358650, guid: 6fa0469e194864a4eb2949e7b5bcb43a, type: 3}
-  inheritVelocityToPieces: 1
-  pieceVelocityMultiplier: 0.9
---- !u!114 &-3594413497076951751
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 6033180923991061543}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 56aa26bf5160b34489fee485bb63731f, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  outlineMaterial: {fileID: 2100000, guid: 4655017c0ae038c4a80d98314dbd216c, type: 2}
